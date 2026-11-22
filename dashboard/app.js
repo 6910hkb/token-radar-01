@@ -222,7 +222,16 @@
         'data-selected': state.selected === r.slug ? 'true' : 'false',
         tabindex: '0',
         onclick: function () { openDetail(r.slug); },
-        onkeydown: function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openDetail(r.slug); } }
+        onkeydown: function (e) {
+          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openDetail(r.slug); }
+          // Arrow keys walk the board without a mouse: focus the next or
+          // previous row in this table body.
+          if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+            e.preventDefault();
+            var next = e.key === 'ArrowDown' ? e.currentTarget.nextElementSibling : e.currentTarget.previousElementSibling;
+            if (next) next.focus();
+          }
+        }
       },
         el('td', { class: 'num', text: String(r.rank) }),
         el('td', null, el('div', { class: 'name' },
@@ -315,6 +324,11 @@
   function openDetail(slug) {
     var row = DATA.rows.filter(function (r) { return r.slug === slug; })[0];
     if (!row) return;
+    // The page recomputes the implied value from the row's own figures;
+    // warn in the console if it ever disagrees with board.json, so a stale
+    // dataset is caught instead of shown silently.
+    var check = impliedOf(row, DATA.model);
+    if (check !== row.implied_value_usd) console.warn('token radar: recomputed implied value differs from board.json for ' + row.slug, check, row.implied_value_usd);
     state.selected = slug;
     writeHash();
     dialog.textContent = '';
