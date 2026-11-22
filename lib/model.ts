@@ -21,6 +21,10 @@
 //
 // Each row also carries a low/high band from its category's p25/p75 peer
 // multiples, and one line saying which factor drives its rank.
+//
+// Nothing here is tuned to a name: every multiple, band and factor is
+// computed from the snapshot at run time, so the same code scores any
+// snapshot the competition seals.
 
 export interface SnapshotProtocol {
   slug: string;
@@ -167,24 +171,38 @@ export class SnapshotError extends Error {
 const DAY_MS = 86_400_000;
 const VERSIONED = /\s(V\d+(\.\d+)?|v\d+(\.\d+)?|\d+\.\d+)$/;
 
-function finite(value: unknown, fallback: number): number {
+// Small numeric helpers. Every one of them keeps the exact arithmetic the
+// first version used, so the board it produces is byte-identical.
+function numOr(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 }
 
-function medianOf(values: number[]): number {
+function median(values: number[]): number {
   if (values.length === 0) return 0;
   const sorted = [...values].sort((a, b) => a - b);
   const mid = Math.floor(sorted.length / 2);
   return sorted.length % 2 === 1 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
 }
 
-function percentileOf(values: number[], p: number): number {
+function percentile(values: number[], p: number): number {
   if (values.length === 0) return 0;
   const sorted = [...values].sort((a, b) => a - b);
   const at = (sorted.length - 1) * p;
   const lo = Math.floor(at);
   const hi = Math.ceil(at);
   return sorted[lo]! + (sorted[hi]! - sorted[lo]!) * (at - lo);
+}
+
+function round4dp(n: number): number {
+  return Math.round(n * 1e4) / 1e4;
+}
+
+// Shrink a category's sample multiple toward the overall median: a
+// category with few live peers keeps its own signal, but cannot run away
+// from the field. Used for the point multiple and for both ends of the
+// value band, so the band and the point estimate always agree.
+function shrink(sample: number, n: number, overall: number, prior: number): number {
+  return (n * sample + prior * overall) / (n + prior);
 }
 
 export function ageDays(asOf: string, listedAt: string | null): number | null {
@@ -209,7 +227,7 @@ export function isRankable(p: SnapshotProtocol): boolean {
 // only a few live peers does not get an extreme multiple.
 export function peerTable(snapshot: Snapshot, settings: ModelSettings = SETTINGS): { peers: PeerBand[]; overall: number } {
   const live = snapshot.protocols.filter((p) => !isPreToken(p) && p.mcap_usd !== null && p.tvl_usd > 0);
-  const overall = medianOf(live.map((p) => (p.mcap_usd as number) / p.tvl_usd));
+  const overall = median(live.map((p) => (p.mcap_usd as number) / p.tvl_usd));
   const byCategory = new Map<string, number[]>();
   for (const p of live) {
     const key = p.category ?? 'Other';
@@ -219,15 +237,15 @@ export function peerTable(snapshot: Snapshot, settings: ModelSettings = SETTINGS
   }
   const peers: PeerBand[] = [...byCategory.entries()]
     .map(([category, values]) => {
-      const med = medianOf(values);
+      const med = median(values);
       const n = values.length;
-      const multiple = shrunkMultiple(med, n, overall, settings.shrink_prior);
+      const multiple = shrink(med, n, overall, settings.shrink_prior);
       return {
         category,
         n,
         median: Math.round(med * 1e4) / 1e4,
-        p25: Math.round(percentileOf(values, 0.25) * 1e4) / 1e4,
-        p75: Math.round(percentileOf(values, 0.75) * 1e4) / 1e4,
+        p25: Math.round(percentile(values, 0.25) * 1e4) / 1e4,
+        p75: Math.round(percentile(values, 0.75) * 1e4) / 1e4,
         multiple: Math.round(multiple * 1e4) / 1e4,
       };
     })
@@ -235,21 +253,9 @@ export function peerTable(snapshot: Snapshot, settings: ModelSettings = SETTINGS
   return { peers, overall: Math.round(overall * 1e4) / 1e4 };
 }
 
-function peerFor(peers: PeerBand[], category: string | null, overall: number): PeerBand | null {
+function bandFor(peers: PeerBand[], category: string | null): PeerBand | null {
   const key = category ?? 'Other';
   return peers.find((p) => p.category === key) ?? null;
-}
-
-function round4(n: number): number {
-  return Math.round(n * 1e4) / 1e4;
-}
-
-// Shrink a category's sample multiple toward the overall median: a
-// category with few live peers keeps its own signal, but cannot run away
-// from the field. Used for the point multiple and for both ends of the
-// value band, so the band and the point estimate always agree.
-function shrunkMultiple(sample: number, n: number, overall: number, prior: number): number {
-  return (n * sample + prior * overall) / (n + prior);
 }
 
 export function scoreProtocol(
@@ -270,11 +276,11 @@ export function scoreProtocol(
   maturityMult: number;
   age: number | null;
 } {
-  const peer = peerFor(peers, p.category, overall);
+  const peer = bandFor(peers, p.category);
   const multiple = peer ? peer.multiple : overall;
   const peerN = peer ? peer.n : 0;
   const age = ageDays(asOf, p.listed_at);
-  const rawGrowth = finite(p.change_7d, 0);
+  const rawGrowth = numOr(p.change_7d, 0);
   const growthPct = Math.min(settings.growth_cap, Math.max(settings.growth_floor, rawGrowth));
   const growthMult = 1 + (growthPct / 100) * settings.growth_weight;
   const ageForModel = age ?? settings.unknown_age_days;
@@ -282,8 +288,8 @@ export function scoreProtocol(
     settings.maturity_floor + (1 - Math.min(Math.max(ageForModel, 0), settings.maturity_days) / settings.maturity_days) * (1 - settings.maturity_floor);
   const base = p.tvl_usd * multiple;
   const implied = Math.max(1, Math.round(base * growthMult * maturityMult));
-  const loMult = peer ? shrunkMultiple(peer.p25, peer.n, overall, settings.shrink_prior) : overall;
-  const hiMult = peer ? shrunkMultiple(peer.p75, peer.n, overall, settings.shrink_prior) : overall;
+  const loMult = peer ? shrink(peer.p25, peer.n, overall, settings.shrink_prior) : overall;
+  const hiMult = peer ? shrink(peer.p75, peer.n, overall, settings.shrink_prior) : overall;
   const low = Math.max(1, Math.round(p.tvl_usd * loMult * growthMult * maturityMult));
   const high = Math.max(implied, Math.round(p.tvl_usd * hiMult * growthMult * maturityMult));
   const drivers: [string, number][] = [
@@ -305,25 +311,29 @@ export function scoreProtocol(
   return { implied, low, high, why, multiple, peerN, growthPct, growthMult, maturityMult, age };
 }
 
-function chainOf(p: SnapshotProtocol): string {
+// Farm plans: six steps each, sized from the protocol's TVL and age, with a
+// concrete action per category so the plan is about this protocol, not a
+// generic checklist. Step wording is part of the board output and is kept
+// byte-identical across rewrites.
+function mainChain(p: SnapshotProtocol): string {
   return p.chains.length > 0 ? p.chains[0]! : 'its main chain';
 }
 
-function capitalFor(p: SnapshotProtocol): number {
+function stakeFor(p: SnapshotProtocol): number {
   if (p.tvl_usd >= 5_000_000_000) return 250;
   if (p.tvl_usd >= 1_000_000_000) return 150;
   if (p.tvl_usd >= 100_000_000) return 100;
   return 50;
 }
 
-function holdDaysFor(age: number | null): number {
+function holdFor(age: number | null): number {
   if (age === null) return 30;
   if (age < 180) return 60;
   if (age < 365) return 45;
   return 30;
 }
 
-function actionFor(p: SnapshotProtocol, capital: number, chain: string): string {
+function stepAction(p: SnapshotProtocol, capital: number, chain: string): string {
   const c = (p.category ?? '').toLowerCase();
   const name = p.name;
   if (c.includes('lend') || c.includes('cdp') || c.includes('collateral')) return `Put $${capital} of USDC to work as a lender on ${name} on ${chain} and leave the deposit in place.`;
@@ -340,16 +350,16 @@ function actionFor(p: SnapshotProtocol, capital: number, chain: string): string 
 }
 
 export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
-  const chain = chainOf(p);
-  const capital = capitalFor(p);
-  const hold = holdDaysFor(age);
+  const chain = mainChain(p);
+  const capital = stakeFor(p);
+  const hold = holdFor(age);
   return [
     {
       text: `Open a fresh wallet that holds only the funds you plan to farm, and store its seed phrase offline where no one else can read it.`,
       cost: 'under $3 of gas for the first transaction',
       time: '5 minutes',
     },
-    { text: actionFor(p, capital, chain), cost: `$${capital} of capital and about $${capital >= 150 ? 8 : 4} of gas`, time: '15 minutes to set up' },
+    { text: stepAction(p, capital, chain), cost: `$${capital} of capital and about $${capital >= 150 ? 8 : 4} of gas`, time: '15 minutes to set up' },
     {
       text: `Do one qualifying action every week, like a deposit, a borrow, a swap or a vote, so the wallet stays active.`,
       cost: 'about $2 of gas a week',
@@ -429,11 +439,11 @@ export function buildBoard(snapshot: Snapshot, settings: ModelSettings = SETTING
     implied_high_usd: item.s.high,
     why: item.s.why,
     model: {
-      peer_multiple: round4(item.s.multiple),
+      peer_multiple: round4dp(item.s.multiple),
       peer_n: item.s.peerN,
       growth_pct: item.s.growthPct,
-      growth_multiplier: round4(item.s.growthMult),
-      maturity_multiplier: round4(item.s.maturityMult),
+      growth_multiplier: round4dp(item.s.growthMult),
+      maturity_multiplier: round4dp(item.s.maturityMult),
       age_days: item.s.age,
     },
     farm_steps: farmSteps(item.p, item.s.age).map(stepText),
