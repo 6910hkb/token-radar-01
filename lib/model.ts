@@ -221,7 +221,7 @@ export function peerTable(snapshot: Snapshot, settings: ModelSettings = SETTINGS
     .map(([category, values]) => {
       const med = medianOf(values);
       const n = values.length;
-      const multiple = (n * med + settings.shrink_prior * overall) / (n + settings.shrink_prior);
+      const multiple = shrunkMultiple(med, n, overall, settings.shrink_prior);
       return {
         category,
         n,
@@ -242,6 +242,14 @@ function peerFor(peers: PeerBand[], category: string | null, overall: number): P
 
 function round4(n: number): number {
   return Math.round(n * 1e4) / 1e4;
+}
+
+// Shrink a category's sample multiple toward the overall median: a
+// category with few live peers keeps its own signal, but cannot run away
+// from the field. Used for the point multiple and for both ends of the
+// value band, so the band and the point estimate always agree.
+function shrunkMultiple(sample: number, n: number, overall: number, prior: number): number {
+  return (n * sample + prior * overall) / (n + prior);
 }
 
 export function scoreProtocol(
@@ -274,8 +282,8 @@ export function scoreProtocol(
     settings.maturity_floor + (1 - Math.min(Math.max(ageForModel, 0), settings.maturity_days) / settings.maturity_days) * (1 - settings.maturity_floor);
   const base = p.tvl_usd * multiple;
   const implied = Math.max(1, Math.round(base * growthMult * maturityMult));
-  const loMult = peer ? (peer.n * peer.p25 + settings.shrink_prior * overall) / (peer.n + settings.shrink_prior) : overall;
-  const hiMult = peer ? (peer.n * peer.p75 + settings.shrink_prior * overall) / (peer.n + settings.shrink_prior) : overall;
+  const loMult = peer ? shrunkMultiple(peer.p25, peer.n, overall, settings.shrink_prior) : overall;
+  const hiMult = peer ? shrunkMultiple(peer.p75, peer.n, overall, settings.shrink_prior) : overall;
   const low = Math.max(1, Math.round(p.tvl_usd * loMult * growthMult * maturityMult));
   const high = Math.max(implied, Math.round(p.tvl_usd * hiMult * growthMult * maturityMult));
   const drivers: [string, number][] = [
