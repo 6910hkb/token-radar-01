@@ -74,7 +74,18 @@ writeFileSync(
   buildDossier(outDir, { text_max_bytes: TEXT_CAP, screenshots: SHOT_CAPS, dashboard: { max_files: 400, max_bytes: 4_194_304 } }),
 );
 
+// Guard the dossier cap here too, so a too-large entry fails loudly now
+// instead of at the gate: 1.5 MiB is 1,572,864 bytes.
+const dossierBytes = statSync(join(outDir, 'dossier.json')).size;
+if (dossierBytes > 1_572_864) die(`dossier.json is ${dossierBytes} bytes: over the 1.5 MiB cap`);
+
+const topThree = board
+  .slice(0, 3)
+  .map((row) => `#${row.rank} ${row.name} $${row.implied_value_usd.toLocaleString('en-US')}`)
+  .join(', ');
+
 process.stdout.write(
   `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside)\n` +
-    `token radar: wrote ${join(outDir, 'board.json')}, ${join(outDir, 'data.js')}, ${join(outDir, 'dashboard')} (${dashboardFiles.length} files), ${join(outDir, 'screenshots')} (${shots.length} images) and ${join(outDir, 'dossier.json')}\n`,
+    `token radar: top three: ${topThree}\n` +
+    `token radar: wrote ${join(outDir, 'board.json')}, ${join(outDir, 'data.js')}, ${join(outDir, 'dashboard')} (${dashboardFiles.length} files), ${join(outDir, 'screenshots')} (${shots.length} images) and ${join(outDir, 'dossier.json')} (${dossierBytes} bytes)\n`,
 );
